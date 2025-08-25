@@ -25,6 +25,50 @@ def inspect_jsonl_types(path: str, n: int = 200) -> None:
         print(k, s)
 
 
+# Columns to keep for v0 dataset
+KEEP_COLUMNS_V0: set[str] = {
+    "id",
+    "contest_id",
+    "index",
+    "time_limit",
+    "memory_limit",
+    "title",
+    "description",
+    "input_format",
+    "output_format",
+    "note",
+    "examples",
+    "rating",
+    "testset_size",
+    "official_tests",
+    "official_tests_complete",
+    "prompt",
+}
+
+
+def _filter_and_normalize_record(record: dict) -> dict:
+    """Return a filtered record with v0 columns and normalized types.
+
+    Normalization rules (to ensure single stable types across rows):
+    - note: None -> ""
+    - examples: None -> []
+    - official_tests: None -> [] (defensive)
+    - Other fields are passed through as-is
+    """
+    filtered: dict = {k: v for k, v in record.items() if k in KEEP_COLUMNS_V0}
+
+    if "note" in filtered and filtered["note"] is None:
+        filtered["note"] = ""
+
+    if "examples" in filtered and filtered["examples"] is None:
+        filtered["examples"] = []
+
+    if "official_tests" in filtered and filtered["official_tests"] is None:
+        filtered["official_tests"] = []
+
+    return filtered
+
+
 def keep_for_v0(p: dict) -> bool:
     if p.get("language") != "cpp":
         return False
@@ -71,7 +115,8 @@ def stream_codeforces_to_jsonl(
     with open(out_jsonl, "w", encoding="utf-8") as f:
         for ex in stream:
             if keep_for_v0(ex):
-                f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+                filtered = _filter_and_normalize_record(ex)
+                f.write(json.dumps(filtered, ensure_ascii=False) + "\n")
                 count += 1
     print(f"Wrote {count} filtered records to {out_jsonl}")
     return out_jsonl, count
@@ -89,14 +134,19 @@ def build_dataset_from_jsonl(
         if parquet_path is None:
             parquet_path = os.path.join(base, "codeforces_v0.parquet")
 
-    print(f"Loading filtered records from: {out_jsonl}")
-    records = []
-    with open(out_jsonl, "r", encoding="utf-8") as f:
-        for line in f:
-            records.append(json.loads(line))
-    print(f"Loaded {len(records)} filtered records")
+    print(f"Loading dataset directly from JSONL: {out_jsonl}")
+    split_name = os.path.basename(os.path.dirname(out_jsonl)) or "train"
+    ds_map = load_dataset(
+        "json",
+        data_files={split_name: out_jsonl},
+    )
+    ds: Dataset = ds_map[split_name]
 
-    ds = Dataset.from_list(records)
+    # Ensure only v0 columns remain (defensive in case input JSONL had extras)
+    extra_cols = [c for c in ds.column_names if c not in KEEP_COLUMNS_V0]
+    if extra_cols:
+        ds = ds.remove_columns(extra_cols)
+
     print("Dataset created")
 
     os.makedirs(ds_dir, exist_ok=True)
